@@ -1,0 +1,1003 @@
+---
+title: "VCP Site Data Check"
+author: "Litvak Lab"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# load required libraries
+library(flexdashboard)
+library(data.table)
+library(ggplot2)
+library(DT)
+library(gridExtra)
+library(lubridate)
+library(plotly)
+library(tidyr)
+library(shiny)
+library(units)
+library(dplyr)
+
+# ENTER YEAR TO CHECK HERE
+yeartocheck <- 2025
+
+# ENTER SITE TO CHECK HERE (capital first letter, lowercase after)
+site <- "Vcp"
+
+# # get windrose function, source directly from Github
+source(paste0("https://raw.githubusercontent.com/MargueriteM/R_functions/master/plot.windrose.R"))
+# 
+ # #basedir <- paste0("C:/FluxTowerData/", site, "/") # for Jakes computer
+ basedir <- paste0("~/Desktop/FluxTowerTest/", site, "/")
+ setwd <- basedir
+# # 
+# # # ## these are for Vcp, add a loop to fetch for other sites - RD 
+# file_ids <- c("16F4UJ7uoviXRzan5qGk8BOk4DQkZDT4v")  # file ID from google drive 
+# file_names <- c(paste0(basedir, "toa5/flux.csv"))
+# # # 
+# # # 
+#  # # Loop through file IDs to download
+# for (i in seq_along(file_ids)) {
+#       file_url <- paste0("https://drive.google.com/uc?id=", file_ids[i])
+#       destfile <- file_names[i]
+#          # Check if the destination file exists, and remove it if so
+#       if (file.exists(destfile)) {
+#           file.remove(destfile)
+#       }
+#       download.file(file_url, destfile, mode = "wb")
+#  }
+# 
+# # import data directly from google drive
+flux_colnames <- fread(paste0(basedir,"/toa5/flux.csv"),
+                   header = TRUE, skip=1,sep=",", fill=TRUE,
+                  na.strings=c(-9999,"#NAME?"))[1,]
+# # 
+#  flux_units <- flux_colnames[1,]
+#  flux <- fread(paste0(basedir,"/toa5/flux.csv"),
+#                    header = FALSE, skip=2, sep=",", fill=TRUE,
+#                   na.strings=c(-9999,"#NAME?"),
+#                col.names=colnames(flux_colnames))
+
+flux <- read.csv(paste0(basedir, "/toa5/flux.csv"), header = FALSE, skip = 4)
+colnames(flux) <- colnames(flux_colnames)
+
+flux <- data.table(flux)
+
+#convert to numeric 
+flux[, 2:ncol(flux) := lapply(.SD, function(x) {
+  as.numeric(as.character(x))
+}), .SDcols = 2:ncol(flux)]
+
+#convert timestamp to posix
+flux$TIMESTAMP <- format(as.POSIXct(flux$TIMESTAMP, tz="MST"), format="%Y-%m-%d %H:%M:%S")
+flux <- subset(flux, year(flux$TIMESTAMP) %in% yeartocheck) # change here
+
+# create derivative date columns
+flux[,':=' (year = year(TIMESTAMP), doy = yday(TIMESTAMP), date = as.Date(TIMESTAMP))]
+flux$date_time = ymd_hms(flux$TIMESTAMP)
+
+# calculate CO2 ppm from CO2_mean (mg/m^3) 
+# https://www.teesing.com/en/page/library/tools/ppm-mg3-converter
+flux[,CO2_ppm := (co2_mean_Avg/0.0409)/44.01]
+
+# get limit data 
+lims <- read.csv(paste0(basedir, "VcpVarLims.csv"))
+
+# grab soil data columns 
+## currently only set up for Vcp
+swc_columns <- c(grep("^SWC_", names(flux), value = TRUE), "TIMESTAMP")
+soilT_columns <- c(grep("^SoilT", names(flux), value=TRUE), "TIMESTAMP")
+soilC_columns <- c(grep("^Soil_CO2", names(flux), value=TRUE), "TIMESTAMP")
+
+soil_SWC <- flux[, ..swc_columns]
+soil_t <- flux[, ..soilT_columns]
+soil_C <- flux[, ..soilC_columns]
+
+# convert to long format
+soilSWC <- soil_SWC %>%
+  pivot_longer(-c(TIMESTAMP),names_to="IDcol") %>%
+  separate(IDcol, c("metric","pit","depth"), sep="_")
+
+soilT <- soil_t %>%
+  pivot_longer(-c(TIMESTAMP),names_to="IDcol") %>%
+  separate(IDcol, c("metric","pit","depth"), sep="_")
+
+soilCO2 <- soil_C %>%
+  pivot_longer(-c(TIMESTAMP),names_to="IDcol") %>%
+  separate(IDcol, c(NA, "metric","pit","depth"), sep="_")
+
+soil <- rbind(soilSWC, soilT, soilCO2)
+
+# format date/time and create depth labels for probes
+soil <- soil %>%
+  mutate(date_time = ymd_hms(TIMESTAMP),
+         date = as.Date(date_time)) 
+
+### grab sap columns
+## currently only set up for Vcp
+sap_columns <- c(grep("^sap_", names(flux), value = TRUE), "TIMESTAMP")
+
+sap_trees <- flux[, ..sap_columns]
+
+# convert to long format
+sapTrees <- sap_trees %>%
+  pivot_longer(-c(TIMESTAMP),names_to="IDcol") %>%
+  separate(IDcol, c("metric","tree_species","probe"), sep="_")
+
+# format date/time and create depth labels for probes
+sapTrees <- sapTrees %>%
+  mutate(date_time = ymd_hms(TIMESTAMP),
+         date = as.Date(date_time)) 
+
+sapTrees <- sapTrees %>%
+  separate(probe, into = c("tree", "probe"), sep = "(?<=\\d)(?=\\D)")
+
+```
+# Fluxes
+
+Column {.sidebar}
+---------------------------------------
+
+###Select Date Range and variables
+
+These graphs show most recent incoming eddy covariance and ancillary data from the tower at the site. Data are 30min mean values.
+
+**Note: Flux calculations are preliminary and for visualization only!!** 
+
+#### Last timestamp when data sent to server:
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+print(max(flux$TIMESTAMP))
+```
+
+**When implementing range filter, missing values get connected by a line.**
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+dateRangeInput("daterange", "Date range:",
+                 start = min(flux$date),
+                 end   = max(flux$date),
+                 min = min(flux$date),
+                 max = max(flux$date))
+
+radioButtons("variable1", "Flux variables:",
+             c("Fc_wpl: CO2 Flux WPL (mg/m2/sec)" = "Fc_wpl",
+               "Hc: Sensible Heat WPL (W/m2)" = "Hc",
+               "LE_wpl: Latent Heat WPL (W/m2)" = "LE_wpl"))
+numericInput("range_flux_max","Max range of flux graph",
+          value = 1000)
+
+ numericInput("range_flux_min","Min range of flux graph",
+            value = -50)
+
+# Choose biomet variable
+radioButtons("variable2", "Biomet variables:",
+             c("Air temperature, hmp (C)" = "RTD_temp_Avg", 
+               "Air temperature, sonic (C)" = "Ts_Avg",
+               "Air temperature, fine wire (C)" = "SBTempC_Avg",
+               "Atmospheric pressure (kPa)" = "press_Avg",
+               "Precipitation (mm)" = "rain_Tot",
+               "PAR out (W/m2)" = "par_facedown_Avg",
+               "PAR in (W/m2)" = "par_faceup_Avg",
+               "Short Wave IN (W/m2)" = "Rad_short_Up_Avg",
+               "Short Wave OUT (W/m2)" = "Rad_short_Dn_Avg",
+               "Long Wave IN (W/m2)" = "Rad_long_Up_Avg",
+               "Long Wave OUT (W/m2)" = "Rad_long_Dn_Avg",
+               "CG3DnCo_Avg" = "CG3DnCo_Avg",
+               "CG3UpCo_Avg" = "CG3UpCo_Avg",
+               "Soil Heat Flux 1 (open) (W/m2)" = "shf_p1_open_Avg",
+               "Soil Heat Flux 2 (open) (W/m2)" = "shf_p2_open_Avg",
+               "Soil Heat Flux 3 (tree) (W/m2)" = "shf_p3_tree_Avg",
+              "Wind Speed (m/s)" = "wnd_spd",
+              "Wind Direction (degrees)" = "wnd_dir_compass",
+              "Relative Humidity 1p35" = "RH_1p35_Avg",
+              "Relative Humidity 8p65" = "RH_8p65_Avg",
+              "Relative Humidity 16" = "RH_16_Avg",
+              "Relative Humididty 24m" = "RH_24_Avg",
+              "NetTot_Avg" = "NetTot_Avg",
+              "NetRs_Avg" = "NetRs_Avg",
+              "NetRl_Avg" = "NetRl_Avg", 
+              "CNR1TC_Avg" = "CNR1TC_Avg",
+              "NR_lite_soil_Avg"="NR_lite_soil_Avg",
+              "par_faceup_Avg" = "par_faceup_Avg",
+              "par_facedown_Avg"="par_facedown_Avg",
+              "AirTC_1p35_Avg" = "AirTC_1p35_Avg",
+              "AirTC_8p65_Avg" = "AirTC_8p65_Avg",
+              "AirTC_16_Avg" = "AirTC_16_Avg",
+              "AirTC_24_Avg" = "AirTC_24_Avg",
+              "Wind_Sentry_4p95_WVc(1)" = "Wind_Sentry_4p95_WVc(1)",
+              "WS_ms_4p95_Avg" = "WS_ms_4p95_Avg",
+              "WindDir_4p95_Avg" = "WindDir_4p95_Avg",
+              "Wind_Sentry_21p65_WVc(1)" = "Wind_Sentry_21p65_WVc(1)",
+              "WS_ms_21p65_Avg" ="WS_ms_21p65_Avg",
+              "Wind_Sentry_4p95_WVc(2)" = "Wind_Sentry_4p95_WVc(2)",
+              "WS_ms_4p95_Avg" ="WS_ms_4p95_Avg",
+              "Wind_Sentry_21p65_WVc(1)" = "Wind_Sentry_21p65_WVc(1)",
+              "Wind_Sentry_21p65_WVc(2)" = "Wind_Sentry_21p65_WVc(2)",
+              "WS_ms_21p65_Avg" = "WS_ms_21p65_Avg", 
+              "WindDir_21p65_Avg" = "WindDir_21p65_Avg",
+              "Albedo_Avg" = "Albedo_Avg",
+              "e_hmp_mean_Avg" = "e_hmp_mean_Avg",
+              "e_sat_Avg" = "e_sat_Avg",
+              "h2o_hmp_mean_Avg" = "h2o_hmp_mean_Avg"))
+
+numericInput("range_met_max","Max range of Biomet graph",
+           value = 40)
+
+numericInput("range_met_min","Min range of Biomet graph",
+           value = -20)
+
+radioButtons("variable3", "Instrument variables:",
+             c("Battery bank avg (V)" = "battbank_Avg",
+               "Battery 3000 avg (V)" ="batt_3000_Avg",
+               "AGC/signal strength (unitless)" = "agc_Avg",
+               "IRGA warnings"="irga_warnings",
+               "CSAT warnings" = "csat_warnings",
+               "Datalogger Panel Voltage (V)" = "panelV_Avg",
+               "n tot" = "n_Tot",
+               "watchdog 3000" = "watchdog_3000_Tot",
+               "low 12V 3000 Tot" = "low12V_3000_Tot",
+               "del_T_f_Tot" = "del_T_f_Tot",
+               "sig_lck_f_Tot"="sig_lck_f_Tot",
+               "amp_h_f_Tot" = "amp_h_f_Tot",
+               "amp_l_f_Tot" = "amp_l_f_Tot",
+               "chopper_f_Tot" = "chopper_f_Tot",
+               "detector_f_Tot" = "detector_f_Tot", 
+               "pll_f_Tot"="pll_f_Tot",
+               "sync_f_Tot"="sync_f_Tot",
+               "SBTempC_Avg"= "SBTempC_Avg",
+               "daysonCard" = "daysonCard",
+               "crdFlag_Tot" = "crdFlag_Tot",
+               "crdMbFree" = "crdMbFree",
+               "SkippedScan" = "SkippedScan",
+               "SkippedSlowScan" = "SkippedSlowScan",
+               "TargTempC_Avg" = "TargTempC_Avg"))
+ 
+```
+
+Column
+-------------------------------------------------------------
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# flux plot
+# Syncing zooms for all plots
+
+renderPlotly({
+  # Prepare Flux Plot
+  c_flux <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                 .SD, .SDcols = c("date", "date_time", input$variable1)]
+  setnames(c_flux, input$variable1, "selected")
+  
+  fluxP <- ggplot(c_flux, aes(date_time, selected)) +
+    geom_line() +
+    labs(y = paste(input$variable1, "raw", sep = " ")) +
+    theme_bw()
+
+  c_flux_sub <- flux %>%
+    pivot_longer(
+      cols = where(is.numeric),
+      names_to = "variable",
+      values_to = "value"
+    ) %>%
+    left_join(lims, by = "variable") 
+  
+  c_flux_goodvals <- subset(c_flux_sub, !value >= max & !value <= min & variable == input$variable1)
+  
+  fluxPgood <- ggplot(c_flux_goodvals, aes(date_time, value)) +
+    geom_line() +
+    labs(y = input$variable1) +
+    theme_bw()
+
+  # Prepare Biomet Plot
+  c_biomet <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                   .SD, .SDcols = c("date", "date_time", input$variable2)]
+  setnames(c_biomet, input$variable2, "selected")
+  
+  BiometP1 <- ggplot(c_biomet, aes(date_time, selected)) +
+    geom_line() +
+    labs(y = input$variable2, title="biomet variable test") +
+    theme_bw()
+  
+  #biomet in range only
+  c_biomet_sub <- flux %>%
+    pivot_longer(
+      cols = where(is.numeric),
+      names_to = "variable",
+      values_to = "value"
+    ) %>%
+    left_join(lims, by = "variable") 
+  
+  c_flux_goodvals <- subset(c_biomet_sub, !value >= max & !value <= min & variable == input$variable2)
+  
+  biometPgood <- ggplot(c_flux_goodvals, aes(date_time, value)) +
+    geom_line() +
+    labs(y = input$variable2) +
+    theme_bw()
+
+  # Prepare Diagnostics Plot
+  c_diag <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                 .SD, .SDcols = c("date", "date_time", input$variable3)]
+  setnames(c_diag, input$variable3, "selected")
+  
+  InstP <- ggplot(c_diag, aes(date_time, selected)) +
+    geom_line() +
+    labs(y = input$variable3) +
+    theme_bw()
+
+  # Convert to plotly
+  p1 <- ggplotly(fluxP) # %>% layout(title = list(text = "Flux Variables"))
+  p1b <- ggplotly(fluxPgood) #%>% layout(title=list(text="Flux Variables, in range only"))
+  p3 <- ggplotly(BiometP1) # %>% layout(title = list(text = "Biomet Variables"))
+  p3b <- ggplotly(biometPgood) #%>% layout(title = list(text = "Biomet Variables, in range only"))
+  p4 <- ggplotly(InstP) # %>% layout(title = list(text = "Instrument Variables"))
+
+  # Combine with subplot and set layout properties
+  plotly::subplot(p1, p1b, p3, p3b, p4, nrows = 5, shareX = TRUE, titleX = TRUE, titleY = TRUE) %>%
+    layout(
+      height = 1500,
+       margin = list(
+        l = 80,   # Left margin
+        r = 200,  # Increased right margin to accommodate legends
+        t = 75,   # Top margin
+        b = 50    # Bottom margin
+      )#,
+      # annotations = list(
+      #   list(x = 0.1, y = 1.02, text = "Flux Variables", showarrow = FALSE, xref = "paper", yref = "paper"),
+      #   list(x=0.1, y = 0.78, text = "Flux Variables, in range only", showarrow = FALSE, xref ="paper", yref="paper"),
+      #   list(x = 0.1, y = 0.62, text = "Biomet Variables", showarrow = FALSE, xref = "paper", yref = "paper"),
+      #   list(x = 0.1, y = 0.5, text = "Biomet Variables, in range only", showarrow = FALSE, xref = "paper", yref = "paper"),
+      #   list(x = 0.1, y = 0.25, text = "Instrument Variables", showarrow = FALSE, xref = "paper", yref = "paper")
+      #)
+    )
+})
+
+```
+
+# Sonic
+
+Column {.sidebar}
+---------------------------------------
+
+###Select Date Range and variables
+
+#### Last timestamp when data sent to server:
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+print(max(flux$TIMESTAMP))
+```
+
+**When implementing range filter, missing values get connected by a line.**
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+dateRangeInput("daterange", "Date range:",
+                 start = min(flux$date),
+                 end   = max(flux$date),
+                 min = min(flux$date),
+                 max = max(flux$date))
+
+ numericInput("range_sonic_max","Max range of Sonic graph",
+           value = 30)
+
+ numericInput("range_sonic_min","Min range of Sonic graph",
+             value =  -30)
+
+radioButtons("variable3", "Instrument variables:",
+             c("Battery bank avg (V)" = "battbank_Avg",
+               "Battery 3000 avg (V)" ="batt_3000_Avg",
+               "AGC/signal strength (unitless)" = "agc_Avg",
+               "IRGA warnings"="irga_warnings",
+               "CSAT warnings" = "csat_warnings",
+               "Datalogger Panel Voltage (V)" = "panelV_Avg",
+               "n tot" = "n_Tot",
+               "watchdog 3000" = "watchdog_3000_Tot",
+               "low 12V 3000 Tot" = "low12V_3000_Tot",
+               "del_T_f_Tot" = "del_T_f_Tot",
+               "sig_lck_f_Tot"="sig_lck_f_Tot",
+               "amp_h_f_Tot" = "amp_h_f_Tot",
+               "amp_l_f_Tot" = "amp_l_f_Tot",
+               "chopper_f_Tot" = "chopper_f_Tot",
+               "detector_f_Tot" = "detector_f_Tot", 
+               "pll_f_Tot"="pll_f_Tot",
+               "sync_f_Tot"="sync_f_Tot",
+               "SBTempC_Avg"= "SBTempC_Avg",
+               "daysonCard" = "daysonCard",
+               "crdFlag_Tot" = "crdFlag_Tot",
+               "crdMbFree" = "crdMbFree",
+               "SkippedScan" = "SkippedScan",
+               "SkippedSlowScan" = "SkippedSlowScan",
+               "TargTempC_Avg" = "TargTempC_Avg"))
+
+ 
+```
+
+Column
+-------------------------------------------------------------
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# flux plot
+# Syncing zooms for all plots
+
+renderPlotly({
+  # Prepare Flux Plot
+  c_sonic <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                 .SD, .SDcols = c("date", "date_time", "Ux_Avg",	"Uy_Avg",	"Uz_Avg")]
+
+    c_sonic_sub <- c_sonic %>%
+    pivot_longer(
+      cols = where(is.numeric),
+      names_to = "variable",
+      values_to = "value"
+    ) %>%
+    left_join(lims, by = "variable") 
+    
+  SonicP <- ggplot(c_sonic_sub, aes(date_time, value)) +
+    geom_line() +
+    facet_wrap(.~variable, ncol = 1)
+    theme_bw()
+
+  # Prepare Biomet Plot
+  c_biomet <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                   .SD, .SDcols = c("date", "date_time", input$variable2)]
+  setnames(c_biomet, input$variable2, "selected")
+  
+  BiometP1 <- ggplot(c_biomet, aes(date_time, selected)) +
+    geom_line() +
+    labs(y = input$variable2) +
+    theme_bw()
+  
+  #biomet in range only
+  c_biomet_sub <- flux %>%
+    pivot_longer(
+      cols = where(is.numeric),
+      names_to = "variable",
+      values_to = "value"
+    ) %>%
+    left_join(lims, by = "variable") 
+  
+  c_flux_goodvals <- subset(c_biomet_sub, !value >= max & !value <= min & variable == input$variable2)
+
+  biometPgood <- ggplot(c_flux_goodvals, aes(date_time, value)) +
+    geom_line() +
+    labs(y = input$variable2) +
+    theme_bw()
+
+  # Prepare Diagnostics Plot
+  c_diag <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                 .SD, .SDcols = c("date", "date_time", input$variable3)]
+  setnames(c_diag, input$variable3, "selected")
+  
+  InstP <- ggplot(c_diag, aes(date_time, selected)) +
+    geom_line() +
+    labs(y = input$variable3) +
+    theme_bw()
+
+  # Convert to plotly
+  p2 <- ggplotly(SonicP) %>% layout(title = list(text = "Sonic Anemometer Variables"))
+  p4 <- ggplotly(InstP) %>% layout(title = list(text = "Instrument Variables"))
+
+  # Combine with subplot and set layout properties
+  plotly::subplot(p2, p4, nrows = 2, shareX = TRUE, titleX = TRUE, titleY = TRUE) %>%
+    layout(
+      height = 1500,
+       margin = list(
+        l = 80,   # Left margin
+        r = 200,  # Increased right margin to accommodate legends
+        t = 75,   # Top margin
+        b = 50    # Bottom margin
+      ),
+      annotations = list(
+        list(x = 0.1, y = 0.67, text = "Sonic Anemometer Variables", showarrow = FALSE, xref = "paper", yref = "paper"),
+        list(x = 0.1, y = 0.15, text = "Instrument Variables", showarrow = FALSE, xref = "paper", yref = "paper")
+      )
+    )
+})
+
+
+```
+
+
+# Windrose {data-orientation=rows}
+
+Row {data-height=75}
+-------------------------------------------------------------
+Select Date Range for Wind Rose
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+dateRangeInput("daterange2", "Date range:",
+                 start = min(flux$date),
+                 end   = max(flux$date),
+                 min = min(flux$date),
+                 max = max(flux$date))
+
+```
+
+Row {data-height=450}
+-------------------------------------------------------------
+Wind Rose in Compass direction
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# Wind direction from Sonic Anemometer
+ renderPlot({
+ wind.data <-  flux %>%
+   filter((date >= input$daterange2[[1]] & date <= input$daterange2[[2]])) 
+ # plot wind variables in windrose
+   plot.windrose(wind.data,wind.data$rslt_wnd_spd,wind.data$wnd_dir_compass) +
+   labs(title="CSAT3")+
+     theme(legend.position="bottom")
+ })
+
+
+```
+
+# Tower Soil Moisture Profile and Met Data
+
+Column {.sidebar}
+---------------------------------------
+
+#### Last timestamp when data sent to server:
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+print(max(soil$date_time))
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+dateRangeInput("daterange3", "Date range:",
+                 start = min(soil$date),
+                 end   = max(soil$date),
+                 min = min(soil$date),
+                 max = max(soil$date))
+
+
+radioButtons("variable1_3", "Soil variables:",
+             c("Temperature (C)" = "SoilT",
+               "Volumetric Water Content m3/m3)" = "SWC",
+               "Soil CO2" = "CO2"))
+
+radioButtons("variable2_3a", "Soil Pit:",
+             c("Pit 1"="P1",
+               "Pit 2"= "P2",
+               "Pit 3"="P3"))
+
+radioButtons("variable2_3", "Soil Depth:",
+             c("5cm"="5",
+               "10cm"= "10",
+               "30cm"="30",
+               "60cm"="60"))
+
+radioButtons("variable3_3", "Biomet variables:",
+             c("Air temperature, hmp (C)" = "RTD_temp_Avg",
+               "Air temperature, sonic (C)" = "Ts_Avg",
+               "Atmospheric pressure (kPa)" = "press_Avg",
+               "Precipitation (mm)" = "rain_Tot",
+                             "PAR out (W/m2)" = "par_facedown_Avg",
+               "PAR in (W/m2)" = "par_faceup_Avg",
+               "Short Wave IN (W/m2)" = "Rad_short_Up_Avg",
+               "Short Wave OUT (W/m2)" = "Rad_short_Dn_Avg",
+               "Long Wave IN (W/m2)" = "Rad_long_Up_Avg",
+               "Long Wave OUT (W/m2)" = "Rad_long_Dn_Avg",
+               "Soil Heat Flux 1 (open) (W/m2)" = "shf_p1_open_Avg",
+               "Soil Heat Flux 2 (open) (W/m2)" = "shf_p2_open_Avg",
+               "Soil Heat Flux 3 (tree) (W/m2)" = "shf_p3_tree_Avg",
+              "Wind Speed (m/s)" = "wnd_spd",
+              "Wind Direction (degrees)" = "wnd_dir_compass"))
+
+
+```
+
+Column 
+---------------------------------------
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+
+renderPlotly({
+  soil$depth <- factor(soil$depth, levels = c("5", "10", "30", "60"))
+  # Soil Faceted Plot
+  soil_faceted_data <- soil %>%
+    filter((date >= input$daterange3[[1]] & date <= input$daterange3[[2]]) &
+           metric == input$variable1_3)
+
+  soil_facetedPlot <- ggplot(soil_faceted_data, aes(date_time, value, colour = pit)) +
+    geom_line() +
+    facet_grid(depth ~ ., scales = "free_y") +
+    labs(y = input$variable1_3) +
+    theme_bw() +
+    theme(legend.position = "right")
+
+  # Soil Selected pit
+  soil_selected_pit_data <- soil %>%
+    filter((date >= input$daterange3[[1]] & date <= input$daterange3[[2]]) &
+           metric == input$variable1_3 &
+           pit == input$variable2_3a)
+
+  soil_selected_pitPlot <- ggplot(soil_selected_pit_data, aes(date_time, value, colour = depth)) +
+    geom_line() +
+    labs(y = input$variable1_3) +
+    theme_bw() +
+    theme(legend.position = "right")
+
+  # Soil Selected Depth
+  soil_selected_depth_data <- soil %>%
+    filter((date >= input$daterange3[[1]] & date <= input$daterange3[[2]]) &
+           metric == input$variable1_3 &
+           depth == input$variable2_3)
+
+  soil_selected_depthPlot <- ggplot(soil_selected_depth_data, aes(date_time, value, color = pit)) +
+    geom_line() +
+    labs(y = input$variable1_3) +
+    facet_grid(depth ~ ., scales = "free_y") +
+    theme_bw() +
+    theme(legend.position = "right")
+
+  # Biomet Plot
+  c_biomet <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                   .SD, .SDcols = c("date", "date_time", input$variable3_3)]
+  setnames(c_biomet, input$variable3_3, "selected")
+
+  BiometP1 <- ggplot(c_biomet, aes(date_time, selected)) +
+    geom_line() +
+    labs(y = input$variable3_3) +
+    theme_bw()
+
+  # Convert to plotly objects
+  p1 <- ggplotly(soil_facetedPlot) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",  # Vertical legend
+        x = 1.1,            # Move legend to the right
+        y = 1
+      )
+    )
+  p2 <- ggplotly(soil_selected_pitPlot) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",
+        x = 1.1,
+        y = 1
+      )
+    )
+  p3 <- ggplotly(soil_selected_depthPlot) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",
+        x = 1.1,
+        y = 1
+      )
+    )
+  p4 <- ggplotly(BiometP1) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",
+        x = 1.1,
+        y = 1
+      )
+    )
+  
+  # Combine subplots
+  plotly::subplot(p1, p2, p3, p4, nrows = 4, shareX = TRUE, titleX = TRUE, titleY = TRUE) %>%
+    layout(
+      height = 1200,
+      margin = list(
+        l = 80,   # Left margin
+        r = 200,  # Increased right margin to accommodate legends
+        t = 75,   # Top margin
+        b = 50    # Bottom margin
+      ),
+      annotations = list(
+        list(
+          x = 0.5, y = 1.05, text = "Soil, All Depths Separately", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        ),
+        list(
+          x = 0.5, y = 0.75, text = "Soil, Selected Pit", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        ),
+        list(
+          x = 0.5, y = 0.5, text = "Soil, Selected Depth", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        ),
+        list(
+          x = 0.5, y = 0.25, text = "Biomet Variables", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        )
+      )
+    )
+})
+
+
+```
+
+# Sap Sensors
+
+Column {.sidebar}
+---------------------------------------
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+# create a sap data frame 
+
+dateRangeInput("daterange4", "Date range:",
+                 start = min(sapTrees$date),
+                 end   = max(sapTrees$date),
+                 min = min(sapTrees$date),
+                 max = max(sapTrees$date))
+
+radioButtons("variable4_1", "Sap Tree:",
+             c("P. pine 1" = "1",
+               "P. pine 2" = "2",
+               "P. pine 3" = "3",
+               "P. pine 4" = "4",
+               "P. pine 5" = "5",
+               "P. pine 6"= "6",
+               "P. pine 7" = "7"))
+
+radioButtons("variable4_2", "Soil variables:",
+             c("Temperature (C)" = "SoilT",
+               "Volumetric Water Content m3/m3)" = "SWC",
+               "Soil CO2" = "CO2"))
+
+radioButtons("variable4_3", "Biomet variables:",
+             c("Air temperature, hmp (C)" = "RTD_temp_Avg",
+               "Air temperature, sonic (C)" = "Ts_Avg",
+               "Atmospheric pressure (kPa)" = "press_Avg",
+               "Precipitation (mm)" = "rain_Tot",
+                             "PAR out (W/m2)" = "par_facedown_Avg",
+               "PAR in (W/m2)" = "par_faceup_Avg",
+               "Short Wave IN (W/m2)" = "Rad_short_Up_Avg",
+               "Short Wave OUT (W/m2)" = "Rad_short_Dn_Avg",
+               "Long Wave IN (W/m2)" = "Rad_long_Up_Avg",
+               "Long Wave OUT (W/m2)" = "Rad_long_Dn_Avg",
+               "Soil Heat Flux 1 (open) (W/m2)" = "shf_p1_open_Avg",
+               "Soil Heat Flux 2 (open) (W/m2)" = "shf_p2_open_Avg",
+               "Soil Heat Flux 3 (tree) (W/m2)" = "shf_p3_tree_Avg",
+              "Wind Speed (m/s)" = "wnd_spd",
+              "Wind Direction (degrees)" = "wnd_dir_compass"))
+```
+
+Column 
+---------------------------------------
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+renderPlotly({
+   sapTrees$tree_label <- paste(sapTrees$tree_species, sapTrees$tree, sep = "")
+    #  Sap Faceted Plot by tree
+   sap_faceted_data <- sapTrees %>%
+       filter((date >= input$daterange4[[1]] & date <= input$daterange4[[2]]))
+      
+   sap_facetedPlot <- ggplot(sap_faceted_data, aes(date_time, value, colour = probe)) +
+     geom_line() +
+     facet_grid(tree_label ~ ., scales = "free_y") +
+     labs(title = "Selected Tree, Probes plotted seperately", y = "sap flow") +
+     theme_bw() +
+     theme(legend.position = "bottom")
+   
+    #all sap trees in one plot
+      sap_data <- sapTrees %>%
+       filter((date >= input$daterange4[[1]] & date <= input$daterange4[[2]]) & 
+     tree==input$variable4_1)
+      
+    sapAllP <-  ggplot(sap_data, aes(date_time, value, colour=probe))+
+      geom_line()+
+      facet_grid(tree~., scales="free_y")+
+     labs(title = "Sap Flow", y="sap flow")+
+     theme_bw()+
+     theme(legend.position="bottom")
+   
+  # Soil All Depths in One Plot
+   soil_all_depths_data <-  soil %>%
+       filter((date >= input$daterange3[[1]] & date <= input$daterange3[[2]]) & 
+     metric==input$variable4_2) 
+     
+  soilP <- ggplot(soil_all_depths_data, aes(date_time, value, colour=depth, linetype=pit))+
+      geom_line()+
+     labs(title = "All Depths", y=input$variable4_2)+
+  theme_bw()+
+     theme(legend.position="bottom")
+
+  # Biomet Plot
+  c_biomet <- flux[date >= input$daterange[[1]] & date <= input$daterange[[2]], 
+                   .SD, .SDcols = c("date", "date_time", input$variable4_3)]
+  setnames(c_biomet, input$variable4_3, "selected")
+
+  BiometP1 <- ggplot(c_biomet, aes(date_time, selected)) +
+    geom_line() +
+    labs(title = "Biomet Variables", y = input$variable4_3) +
+    theme_bw()
+
+  # Convert to plotly objects
+  p1 <- ggplotly(sap_facetedPlot) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",  # Vertical legend
+        x = 1.1,            # Move legend to the right
+        y = 1
+      )
+    )
+  p2 <- ggplotly(sapAllP) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",
+        x = 1.1,
+        y = 1
+      )
+    )
+  p3 <- ggplotly(soilP) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",
+        x = 1.1,
+        y = 1
+      )
+    )
+  p4 <- ggplotly(BiometP1) %>%
+    layout(
+      showlegend = TRUE, 
+      legend = list(
+        orientation = "v",
+        x = 1.1,
+        y = 1
+      )
+    )
+  
+  # Combine subplots
+  plotly::subplot(p1, p2, p3, p4, nrows = 4, shareX = TRUE, titleX = TRUE, titleY = FALSE) %>%
+    layout(
+      height = 1200,
+      margin = list(
+        l = 80,   # Left margin
+        r = 200,  # Increased right margin to accommodate legends
+        t = 75,   # Top margin
+        b = 50    # Bottom margin
+      ),
+      annotations = list(
+        list(
+          x = 0.5, y = 1.05, text = "Sap flow, All Trees Separately", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        ),
+        list(
+          x = 0.5, y = 0.75, text = "Sap flow, Selected Tree Only", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        ),
+        list(
+          x = 0.5, y = 0.5, text = "Soil, All Depths", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        ),
+        list(
+          x = 0.5, y = 0.25, text = "Biomet Variables", 
+          showarrow = FALSE, xref = "paper", yref = "paper", 
+          font = list(size = 14)
+        )
+      )
+    )
+})
+
+
+```
+
+# Missing and Out-of-Range Data
+
+Column {.sidebar}
+---------------------------------------
+
+### Select Date Range and Variables
+
+```{r, echo=FALSE}
+# Inputs for filtering and variable selection
+dateRangeInput("daterange5", 
+               "Date range:",
+                 start = min(soil$date)- 10,
+                 end   = max(soil$date),
+                 min = min(soil$date),
+                 max = max(soil$date))
+# selectInput(
+#   "selected_variable",
+#   "Select Variable to View Details:",
+#   choices = NULL,  # Dynamically populated
+#   multiple = FALSE
+# )
+
+# Download button for exporting results
+# downloadButton("download_report", "Download Report")
+```
+
+
+Column
+---------------------------------------
+
+### Interactive Plot: Out-of-Range Data
+
+
+```{r, echo=FALSE}
+# 
+# #filter data to prior two week period
+# #flux_sub2 <- flux %>% filter((date >= input$daterange5[[1]] & date <= input$daterange5[[2]]))
+# flux_sub2 <- reactive({
+#   req(input$daterange5)  
+#   flux %>% filter(date >= input$daterange5[[1]] & date <= input$daterange5[[2]])
+# })
+# 
+# # initialize DF 
+# OORM_df <- data.frame()
+# 
+# # Go through variables and find mins and maxes,
+# # populate a table with the timestamp, variable, and value of the oor and/or missing values 
+# varsToCheck <- names(flux_sub2)[!names(flux_sub2) %in% c("TIMESTAMP", "RECORD", "doy", "date", "date_time")]
+# for (var in varsToCheck) {
+#   vars <- c("TIMESTAMP", var)
+#   varData <- flux_sub2[,..vars]
+#   varData <- as.data.frame(varData)
+#   limsVar <- subset(lims, variable==var)
+#   OutofRange <- subset(varData,(varData[,2] < limsVar$min | varData[,2] > limsVar$max | varData[,2] == "NAN"))
+#   OutofRangeL <- OutofRange %>%
+#     pivot_longer(-c(TIMESTAMP),names_to="variable")
+#   OORM_df <- rbind(OORM_df, OutofRangeL)
+# }
+# 
+# ## now find consecutive timestamps for each variable and put in stop and start time 
+# OORM_table1 <- data.frame()
+# OORM_tableM <- data.frame()
+# 
+# for (var2 in unique(OORM_df$variable)) {
+#   # lump data into consecutive chunks in a list? then pick min and max? 
+#   suboorm <- subset(OORM_df, variable == var2)
+#   if (nrow(suboorm)==1) {
+#     valueType <- ifelse(suboorm$value=="NAN", "missing", "out-of-range")
+#     oormtab_singles <- data.frame("TIMESTAMP" = suboorm$TIMESTAMP,
+#                           "variable" == suboorm$variable,
+#                           "start" = suboorm$TIMESTAMP,
+#                           "end" = suboorm$TIMESTAMP)
+#     OORM_table1 <- rbind(oormtab_singles, OORM_table1)
+#   }
+#   if (nrow(suboorm)>1) {
+#     suboorm$TIMESTAMP <- as.POSIXct(suboorm$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz = "MST") 
+#     suboorm$time_diff <- c(NA, diff(suboorm$TIMESTAMP))
+#     suboorm$valueType <- ifelse(suboorm$value=="NAN", "missing", "out-of-range")
+#     #suboorm$group <- cumsum(is.na(suboorm$time_diff) | suboorm$time_diff > 30 * 60)
+#     # check to make sure this works 
+#     suboorm <- suboorm %>%
+#           mutate(group = cumsum(is.na(time_diff) | 
+#                         time_diff > 30 * 60 | 
+#                         valueType != lag(valueType, default = first(valueType))))
+#     for (grp in 1:length(unique(suboorm$group))) {
+#        group_data <- subset(suboorm, group==grp)
+#        oormtab_multiples <- data.frame("variable" = unique(group_data$variable),
+#                           "start" = min(group_data$TIMESTAMP),
+#                           "end" = max(group_data$TIMESTAMP),
+#                          "total_time_hrs" = as.numeric(difftime(max(group_data$TIMESTAMP), min(group_data$TIMESTAMP), units = "hours")),
+#                          "value_type" = unique(group_data$valueType))
+#        OORM_tableM <- rbind(oormtab_multiples, OORM_tableM)
+#     }
+#   }
+# }
+# 
+# OORM_tableM_0rem <- subset(OORM_tableM, total_time_hrs > 0)
+# 
+# OORM_tableM_0rem
+# filedate <- str_replace(max(flux$date), "-", "_")
+# filedate <- str_replace(filedate, "-", "_")
+# fileprefix_missingOOR <- paste0(basedir, "VCPmissingORoutofrange_")
+# # ## fix so that it greps for the filename prefix instead 
+# # if (!file.exists(grepl(fileprefix_missingOOR, basedir))) {
+# #     write.csv(OORM_tableM_0rem, filename_missingOOR, row.names = FALSE)
+# #  }
+# # # if file does exist, pull up old file, and append, then remove the old file, change date. 
+# # write.csv(OORM_tableM_0rem, paste0(basedir, "VCPmissingORoutofrange_", filedate, ".csv")), row.names = FALSE)
+
+```
