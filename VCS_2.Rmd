@@ -7,22 +7,23 @@ runtime: shiny
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-# load required libraries
-library(flexdashboard)
-library(data.table)
-library(clifro)
-library(stringr)
-library(openair)
-library(ggplot2)
-library(DT)
-library(gridExtra)
-library(lubridate)
-library(plotly)
-library(tidyr)
-library(shiny)
-library(units)
-library(ggpubr)
-library(dplyr)
+
+
+# Vector of required packages
+packages <- c(
+  "flexdashboard", "data.table", "clifro", "openair", "ggplot2",
+  "stringr", "DT", "gridExtra", "lubridate", "plotly",
+  "tidyr", "shiny", "units", "ggpubr", "dplyr"
+)
+
+# Install any packages that aren't already installed
+installed <- packages %in% rownames(installed.packages())
+if (any(!installed)) {
+  install.packages(packages[!installed])
+}
+
+# Load all packages
+lapply(packages, library, character.only = TRUE)
 
 # ENTER YEAR TO CHECK HERE 
 ### Beginning of time takes a really long time to render - have it as a separate script if someone wants to view it. 
@@ -32,8 +33,31 @@ yeartocheck <- 2025
 site <- "Vcs"
 
 # #basedir 
-basedir <- paste0("~/Desktop/FluxTowerCheck/", site, "/")
-setwd <- basedir
+
+# detect PC or Mac
+os_type <- Sys.info()[["sysname"]]
+
+if (os_type == "Windows") {
+  message("You're on a PC")
+} else if (os_type == "Darwin") {
+  message("You're on a Mac")
+} else {
+  message(paste("You're on", os_type))
+}
+
+if (os_type == "Darwin") {
+  basedir <- paste0("~/Desktop/FluxTowerCheck/", site, "/")
+} else {
+  basedir_p1 <- file.path(Sys.getenv("USERPROFILE"), "Desktop")
+  basedir <- paste0(basedir_p1, "/FluxTowerCheck/", site, "/")
+}
+
+# Create the directory if it doesn't exist
+if (!dir.exists(basedir)) {
+  dir.create(basedir, recursive = TRUE)
+}
+
+setwd(basedir)
 
 ## these are for Vcp, add a loop to fetch for other sites - RD 
 file_ids <- c("15oaGIHhoYHnMm1YFhqobgRpQ0ZCP7--P", "1ZZgiePAUGm0qIfO1icUCLcERli6f5J2h", "15LCz6oL4cOkmJBh5evIKfR_VVrFNVE8s", "15MR6i_sfjj4vhDCzmWGSzfZdB8DuCtGD") 
