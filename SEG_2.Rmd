@@ -417,6 +417,7 @@ Column
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
 
+# this creates and renders a table with date ranges for missing or out of range data. 
 output$longmissingTable <- renderTable({
   # List of IR-related variables and their corresponding tables
   ir_vars <- list(
@@ -856,34 +857,28 @@ Column
 -------------------------------------------------------------
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
-
 output$longmissingTableco2h2o <- renderTable({
-  # List of IR-related variables and their corresponding tables
   ir_vars2 <- list(
     "co2_um_m_Avg_IR" = CO2_long_na_periods,
-    "h2o_mm_m_Avg_IR" = h2o_long_na_periods,
-    "co22_dry_Avg" = co22_long_na_periods)
+    "co22_um_m_Avg_IR" = co22_long_na_periods,
+    "h2o_mm_m_Avg_IR" = h2o_long_na_periods
+  )
 
-  # Initialize a list to hold results
   results2 <- list()
 
   for (var_name in names(ir_vars2)) {
     tab <- ir_vars2[[var_name]]
 
     if (!is.null(tab) && nrow(tab) > 0) {
-      # Format and add variable column
       formatted_tab <- tab %>%
         mutate(
           Variable = var_name,
-          start_time = format(as.POSIXct(start_time, origin = "1970-01-01", tz = "UTC"),
-                              "%Y-%m-%d %H:%M:%S"),
-          end_time = format(as.POSIXct(end_time, origin = "1970-01-01", tz = "UTC"),
-                            "%Y-%m-%d %H:%M:%S")
+          start_time = format(as.POSIXct(start_time, origin = "1970-01-01", tz = "UTC"), "%Y-%m-%d %H:%M:%S"),
+          end_time = format(as.POSIXct(end_time, origin = "1970-01-01", tz = "UTC"), "%Y-%m-%d %H:%M:%S")
         ) %>%
-        select(Variable, everything())  # put Variable as first column
+        select(Variable, everything())
       results2[[var_name]] <- formatted_tab
     } else {
-      # Add a message row for variables with no long NA periods
       results2[[var_name]] <- data.frame(
         Variable = var_name,
         Message = "No periods out-of-range for > 4 consecutive hours.",
@@ -892,8 +887,7 @@ output$longmissingTableco2h2o <- renderTable({
     }
   }
 
-  # Combine into one data frame
-  do.call(rbind, results2)
+  dplyr::bind_rows(results2)
 })
 
 uiOutput("longmissingTableco2h2o")
