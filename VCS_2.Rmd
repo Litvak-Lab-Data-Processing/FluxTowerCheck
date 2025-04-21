@@ -31,8 +31,8 @@ yeartocheck <- 2025
 # ENTER SITE TO CHECK HERE (capital first letter, lowercase after)
 site <- "Vcs"
 
-# #basedir <- paste0("C:/FluxTowerData/", site, "/") # for Jakes computer
-basedir <- paste0("~/Desktop/FluxTowerTest/", site, "/")
+# #basedir 
+basedir <- paste0("~/Desktop/FluxTowerCheck/", site, "/")
 setwd <- basedir
 
 ## these are for Vcp, add a loop to fetch for other sites - RD 
@@ -503,11 +503,8 @@ dateRangeInput("daterange", "Date range:",
 
 radioButtons("variable1", "Flux variables:",
              c("Fc_wpl: CO2 Flux WPL (mg/m2/sec)" = "Fc_wpl",
-               "Fc_wpl: in range only" = "Fc_wpl_IR",  
                "Hc: Sensible Heat WPL (W/m2)" = "Hc",
-               "Hc: in range only" = "Hc_IR",
-               "LE_wpl: Latent Heat WPL (W/m2)" = "LE_wpl",
-               "LE_wpl: in range only" = "LE_wpl_IR"))
+               "LE_wpl: Latent Heat WPL (W/m2)" = "LE_wpl"))
 
 numericInput("range_flux_max","Max range of raw flux graph",
           value = 1000)

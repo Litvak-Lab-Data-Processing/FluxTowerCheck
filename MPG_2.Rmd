@@ -32,7 +32,7 @@ yeartocheck <- 2025
 site <- "Mpg"
 
 # #basedir <- paste0("C:/FluxTowerData/", site, "/") # for Jakes computer
-basedir <- paste0("~/Desktop/FluxTowerTest/", site, "/")
+basedir <- paste0("~/Desktop/FluxTowerCheck/", site, "/")
 
 # Create the directory if it doesn't exist
 if (!dir.exists(basedir)) {
@@ -41,7 +41,7 @@ if (!dir.exists(basedir)) {
 
 setwd(basedir)
 
-## these are for Vcp, add a loop to fetch for other sites - RD 
+# file IDs
 file_ids <- c("16Uxw1K1pmymRfRWukxzIO9bpRwKczLOU", "16XQL57HbfswxkVL3EDK3vIUIRR6izntz")  # file ID from google drive 
 file_names <- c(paste0(basedir, "toa5/flux.csv"), paste0(basedir, "toa5/soil.csv"))
 
@@ -60,6 +60,7 @@ for (i in seq_along(file_ids)) {
       }
       download.file(file_url, destfile, mode = "wb", timeout =300) 
 }
+
 
 
 # import data directly from google drive
@@ -84,7 +85,7 @@ flux[, 2:ncol(flux) := lapply(.SD, function(x) {
 }), .SDcols = 2:ncol(flux)]
 
 #convert timestamp to posix
-flux$TIMESTAMP <- as.POSIXct(flux$TIMESTAMP, format="%Y-%m-%d %H:%M:%S", tz="MST")
+flux$TIMESTAMP <- format(as.POSIXct(flux$TIMESTAMP, tz="MST"), format="%Y-%m-%d %H:%M:%S")
 flux <- subset(flux, year(flux$TIMESTAMP) %in% yeartocheck) # change here
 
 # create derivative date columns
@@ -142,6 +143,7 @@ soil <- subset(soil, year(soil$TIMESTAMP) %in% yeartocheck) # change here
 soil[,':=' (year = year(TIMESTAMP), doy = yday(TIMESTAMP), date = as.Date(TIMESTAMP))]
 soil$date_time = lubridate::ymd_hms(soil$TIMESTAMP)
 soil$date <- as.Date.POSIXct(soil$date_time, format="%Y-%m-%d")
+soil <- subset(soil, !is.na(soil$date))
 soil <- subset(soil, year(date) == yeartocheck)
 
 # grab soil data columns 
@@ -181,7 +183,6 @@ sap_columns <- c(grep("^sap_", names(soil), value = TRUE), "TIMESTAMP")
 # sub to sap columns only
 sap_trees <- soil[, ..sap_columns]
 colnames(sap_trees) <- str_replace(colnames(sap_trees), "(sap_J\\d+)([A-Za-z])", "\\1_\\2")
-colnames(sap_trees) <- str_replace(colnames(sap_trees), "(sap_P\\d+)([A-Za-z])", "\\1_\\2")
 
 # convert to long format
 sapTrees <- sap_trees %>%
@@ -413,7 +414,10 @@ radioButtons("micrometvars", "Micromet. variables:",
                "NetTot_Avg (W/m)" = "NetTot_Avg",
                "PAR (umol/m2/s)"="PAR",
                "infrared" = "infrared",
-               "rH_hmp" = "rH_hmp"))  # here 
+               "rH_hmp" = "rH_hmp",
+               "wind dir." = "wind dir.",
+               "wind speed" = "calcWS",
+               "IRT" = "IRT"))  
 
 numericInput("range_met_max","Max range of Biomet graph",
            value = 30)
@@ -427,6 +431,7 @@ Column
 -------------------------------------------------------------
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
 
 # this creates and renders a table with date ranges for missing or out of range data. 
 output$longmissingTable <- renderTable({
@@ -539,10 +544,11 @@ flux1$date <- as.Date.POSIXct(flux1$date_time, format="%Y-%m-%d")
                                              "Rad_short_Up_Avg", "Rad_short_Dn_Avg", "NetRs_Avg",
                                              "Rad_long_Up_Avg", "Rad_long_Dn_Avg",
                                              "NetRl_Avg", "CG3UpCo_Avg","CG3DnCo_Avg",
-                                             "wnd_dir_compass", "wnd_dir_csat3", "wnd_spd",
-                                             "rslt_wnd_spd", "std_wnd_dir", "WS_ms_4p95_Avg","WS_ms_21p65_Avg",
+                                             "wnd_dir_compass", "wnd_dir_csat3", "std_wnd_dir",
+                                             "rslt_wnd_spd", "wnd_spd", 
                                              "NetTot_Avg", "par_faceup_Avg", 
-                                             "par_facedown_Avg", "TargmV_Avg", "SBTempC_Avg", "TargTempC_Avg",
+                                             "par_facedown_Avg", 
+                                             "TargmV_Avg", "SBTempC_Avg", "TargTempC_Avg",
                                              "P2_IRT_Avg" = "P2_IRT_Avg",
                                              "P4_IRT_Avg" = "P4_IRT_Avg",
                                              "P8_IRT_Avg" = "P8_IRT_Avg",
@@ -554,7 +560,7 @@ flux1$date <- as.Date.POSIXct(flux1$date_time, format="%Y-%m-%d")
                                              "canopyW_IRT_Avg" = "canopyW_IRT_Avg",
                                              "canopyE_IRT_Avg" = "canopyE_IRT_Avg"),
                              "CombinedPlotVar"=c(rep("AirTC", 2), rep("RH", 1), rep("rH_hmp", 3), rep("SW", 3),
-                                                 rep("LW", 3), rep("LW",2), rep("calcWS", 7),
+                                                 rep("LW", 3), rep("LW",2), rep("wind dir.", 3), rep("calcWS", 2),
                                                 "NetTot_Avg", rep("PAR", 2),
                                                  rep("infrared", 3), rep("IRT", 10)))
    
@@ -755,18 +761,18 @@ renderPlotly({
     ) %>%
     left_join(lims, by = "variable") 
   
-  c_flux_goodvals <- subset(c_biomet_sub, variable == "rain_Tot")
+  rain <- subset(c_biomet_sub, variable == "rain_Tot")
   
-  biometPgood <- ggplot(c_flux_goodvals, aes(date_time, value)) +
+  rain <- ggplot(rain, aes(date_time, value)) +
     geom_col() +
     labs(y = "total P. (mm)") +
-    lims(y = c(input$range_met_min, input$range_met_max)) + 
     theme_bw()
+
 
   # # Convert to plotly
   p2 <- ggplotly(SonicP) %>% layout(title = list(text = "Sonic Anemometer Variables 1"))
   p3 <- ggplotly(SonicP2) %>% layout(title = list(text = "Sonic Anemometer Variables 2"))
-  p3_5 <- ggplotly(biometPgood) %>% layout(title = list(text = "Precip."))
+  p3_5 <- ggplotly(rain) %>% layout(title = list(text = "Precip."))
   p4 <- ggplotly(InstP) %>% layout(title = list(text = "Instrument Variables"))
   
   plotly::subplot(
